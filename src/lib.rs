@@ -21,7 +21,7 @@ use serde_json::{Map, Value};
 use std::{
     fmt,
     io::Read,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, Weak},
 };
 
 /// A full browser fingerprint. Less common and future fields are preserved in
@@ -64,15 +64,23 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// An immutable, shareable dataset, loaded once for the bundled data.
+// Keep the bulk allocation outside the Arc allocation: a stale Weak cache must
+// retain only its small control block, not the entire inline profile array.
+type ProfileStorage = Box<[UserAgentData]>;
+
+/// An immutable dataset shared while any dataset or generator owns it.
 #[derive(Clone, Debug)]
-pub struct Dataset(Arc<[UserAgentData]>);
+pub struct Dataset(Arc<ProfileStorage>);
 
 impl Dataset {
+    /// Reuse live bundled data. After the last owner is dropped, the decoded
+    /// profiles are freed; the next call loads the embedded gzip again.
     pub fn bundled() -> Result<Self, Error> {
-        static DATA: OnceLock<Result<Dataset, Error>> = OnceLock::new();
-        DATA.get_or_init(|| Self::from_gzip(include_bytes!("../data/user-agents.json.gz")))
-            .clone()
+        static DATA: Mutex<Weak<ProfileStorage>> = Mutex::new(Weak::new());
+        load_shared(&DATA, || {
+            Self::from_gzip(include_bytes!("../data/user-agents.json.gz")).map(|data| data.0)
+        })
+        .map(Self)
     }
 
     pub fn from_gzip(bytes: &[u8]) -> Result<Self, Error> {
@@ -121,7 +129,7 @@ impl Dataset {
         if !profiles.iter().any(|profile| profile.weight > 0.0) {
             return Err(Error::NoPositiveWeight);
         }
-        Ok(Self(profiles.into()))
+        Ok(Self(Arc::new(profiles.into_boxed_slice())))
     }
 
     pub fn profiles(&self) -> &[UserAgentData] {
@@ -187,16 +195,14 @@ impl Selection {
 pub struct Generator(Arc<Selection>);
 
 impl Generator {
-    /// Use the bundled dataset and a distribution prepared once per process.
+    /// Share live bundled data and its prepared distribution. Dropping the last
+    /// owner frees its data and indices; construction afterward reloads them.
     pub fn new() -> Result<Self, Error> {
-        static SELECTION: OnceLock<Result<Arc<Selection>, Error>> = OnceLock::new();
-        SELECTION
-            .get_or_init(|| {
-                let dataset = Dataset::bundled()?;
-                Selection::new(dataset.clone(), (0..dataset.0.len()).collect()).map(Arc::new)
-            })
-            .clone()
-            .map(Self)
+        static SELECTION: Mutex<Weak<Selection>> = Mutex::new(Weak::new());
+        load_shared(&SELECTION, || {
+            Dataset::bundled()?.generator().map(|generator| generator.0)
+        })
+        .map(Self)
     }
 
     fn from_indices(dataset: Dataset, indices: Vec<usize>) -> Result<Self, Error> {
@@ -261,8 +267,121 @@ impl Generator {
     }
 }
 
+// The cache holds no strong reference. Serialize loading so simultaneous callers
+// share one allocation, then release the lock before sampling/filtering/ranking.
+fn load_shared<T>(
+    cache: &Mutex<Weak<T>>,
+    load: impl FnOnce() -> Result<Arc<T>, Error>,
+) -> Result<Arc<T>, Error> {
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(value) = cached.upgrade() {
+        return Ok(value);
+    }
+    let value = load()?;
+    *cached = Arc::downgrade(&value);
+    Ok(value)
+}
+
 impl fmt::Display for UserAgentData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.user_agent)
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn last_owner_releases_data_and_indices_then_next_use_reloads() {
+        // Local caches keep the lifetime assertions independent of parallel tests.
+        let data_cache = Mutex::new(Weak::<ProfileStorage>::new());
+        let selection_cache = Mutex::new(Weak::<Selection>::new());
+        let loads = Cell::new(0);
+        let load = || {
+            load_shared(&selection_cache, || {
+                let dataset = Dataset(load_shared(&data_cache, || {
+                    loads.set(loads.get() + 1);
+                    Dataset::from_gzip(include_bytes!("../data/user-agents.json.gz"))
+                        .map(|data| data.0)
+                })?);
+                dataset.generator().map(|generator| generator.0)
+            })
+            .map(Generator)
+        };
+
+        let first = load().unwrap();
+        let second = load().unwrap();
+        assert!(Arc::ptr_eq(&first.0, &second.0));
+        assert_eq!(loads.get(), 1);
+        let filtered = first.filter(|_| true).unwrap();
+        let cloned = filtered.clone();
+        let owned_sample = first.sample().clone();
+        let selection = Arc::downgrade(&first.0);
+        let data = Arc::downgrade(&first.0.dataset.0);
+
+        drop(first);
+        drop(second);
+        assert!(
+            selection.upgrade().is_none(),
+            "default indices must be dropped"
+        );
+        assert!(
+            data.upgrade().is_some(),
+            "filtered owners keep the dataset alive"
+        );
+        drop(filtered);
+        assert!(data.upgrade().is_some(), "a clone is still an owner");
+        drop(cloned);
+        assert!(
+            data.upgrade().is_none(),
+            "the cache must not keep profiles alive"
+        );
+        assert!(!owned_sample.user_agent.is_empty());
+
+        let reloaded = load().unwrap();
+        assert_eq!(loads.get(), 2);
+        assert!(!reloaded.is_empty());
+    }
+
+    #[test]
+    fn default_constructors_share_live_data() {
+        let first = Generator::new().unwrap();
+        let second = Generator::new().unwrap();
+        let dataset = Dataset::bundled().unwrap();
+        assert!(Arc::ptr_eq(&first.0, &second.0));
+        assert!(Arc::ptr_eq(&first.0.dataset.0, &dataset.0));
+    }
+
+    #[test]
+    fn concurrent_callers_load_once_while_owners_exist() {
+        use std::sync::{
+            Barrier,
+            atomic::{AtomicUsize, Ordering},
+        };
+        let cache = Arc::new(Mutex::new(Weak::new()));
+        let barrier = Arc::new(Barrier::new(8));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let (cache, barrier, loads) = (cache.clone(), barrier.clone(), loads.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    load_shared(&cache, || {
+                        loads.fetch_add(1, Ordering::Relaxed);
+                        Ok(Arc::new(42))
+                    })
+                    .unwrap()
+                })
+            })
+            .collect();
+        let owners: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(loads.load(Ordering::Relaxed), 1);
+        assert!(owners.iter().all(|owner| Arc::ptr_eq(owner, &owners[0])));
+        drop(owners);
+        assert!(cache.lock().unwrap().upgrade().is_none());
     }
 }

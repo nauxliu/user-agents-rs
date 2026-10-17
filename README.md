@@ -2,7 +2,7 @@
 
 A Rust port of [Intoli's user-agents](https://github.com/intoli/user-agents), with frequency-weighted random sampling, full browser fingerprints, recursive filters, and most-common profiles. BSD-2-Clause; Intoli's original license is retained.
 
-The gzip dataset is bundled into the executable with `include_bytes!`, decoded once, and shared between generators. Sampling uses a precomputed cumulative distribution and binary search. A generator owns the prepared distribution; samples borrow immutable profiles from it. Construction and ranking do not access an RNG.
+The gzip dataset is bundled into the executable with `include_bytes!`, decoded on demand, and shared between live generators. Sampling uses a precomputed cumulative distribution and binary search. A generator owns the prepared distribution; samples borrow immutable profiles from it. Construction and ranking do not access an RNG.
 
 ## Library
 
@@ -51,6 +51,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 `UserAgentData` exposes common fields in Rust's `snake_case` and implements `Display` for the HTTP header. Less common fields such as `connection`, `language`, `oscpu`, and unknown future properties are preserved in `extra` with their original JSON names. Serialization reconstructs the full fingerprint, including nulls.
 
 For external data, use `Dataset::from_gzip` or `Dataset::from_json`, then `dataset.generator()`. Invalid/negative weights are rejected; zero-weight entries can appear in `top()` but are never sampled. Filtered generators require at least one positive weight. Gzip parsing consumes all members, accepts zero padding between/after members like Python's gzip reader, and rejects malformed/truncated streams and other trailing data.
+
+### Releasing memory
+
+Datasets and generators use shared ownership. The global caches hold only weak references: the decoded profiles and indices are freed when their last owner is dropped, including any cloned or filtered generators. A later call loads the embedded gzip again. Keep a generator alive while you need it to avoid repeatedly loading the dataset.
+
+```rust
+let generator = user_agents::Generator::new()?;
+let header = generator.sample().user_agent.clone();
+drop(generator); // Frees decoded data if there are no other datasets/generators.
+// `header` is an independent String and can still be used.
+```
+
+Leaving a scope releases owners automatically. Borrowed samples cannot outlive their generator; explicitly cloned profiles are independent allocations. The temporary JSON buffer is freed immediately after parsing. The embedded gzip stays in the program's read-only data. Freed heap allocations return to the allocator; process RSS need not decrease immediately.
 
 ### JSON filter adapter
 
