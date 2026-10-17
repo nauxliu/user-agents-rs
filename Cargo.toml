@@ -1,0 +1,24 @@
+[package]
+name = "user-agents"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Frequency-weighted random user agents and browser fingerprints, powered by Intoli's daily dataset"
+license = "BSD-2-Clause"
+repository = "https://github.com/nauxliu/user-agents-rs"
+readme = "README.md"
+keywords = ["user-agent", "browser", "fingerprint", "random"]
+categories = ["web-programming", "simulation"]
+include = ["src/**", "data/**", "Cargo.toml", "Cargo.lock", "README.md", "LICENSE", "UPSTREAM.md", "upstream.lock.json"]
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+flate2 = "1.1"
+rand = "0.10"
+regex = "1.13"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "user-agents"
+path = "src/main.rs"

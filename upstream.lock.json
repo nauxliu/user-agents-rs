@@ -1,0 +1,87 @@
+{
+  "branch": "main",
+  "files": {
+    ".babelrc": {
+      "mode": "100644",
+      "sha256": "18b6cc5abeaf8eba1981221fb86f2f381e5833adea6769dc4a9b50bdfbfa0133"
+    },
+    ".circleci/config.yml": {
+      "mode": "100644",
+      "sha256": "f4b50a4f371c04258fa0757fa5d08b44330cc36220d78d1995ed059845e78775"
+    },
+    ".clabot": {
+      "mode": "100644",
+      "sha256": "05e3274d9b3c61d5415be2085cfbffae311b89765852f879f592c45f746bc862"
+    },
+    ".dir-locals.el": {
+      "mode": "100644",
+      "sha256": "bb33727b5f1d397f7a6e8d0cf001d8cd0a434c5f7bd4b0804691cad70774a27a"
+    },
+    ".gitignore": {
+      "mode": "100644",
+      "sha256": "674f9ecfe6cfb7ed75c82b8020645d8de26ecc95e4b19f6b2581d5aafec6992b"
+    },
+    ".mocharc.cjs": {
+      "mode": "100644",
+      "sha256": "8222b8169ee86f25cdccd84d340340060ae3f0cff55e2ea9d344d7c332733b71"
+    },
+    ".prettierignore": {
+      "mode": "100644",
+      "sha256": "a36e31ddde8893dabce88174c6ce5ad3b710cc9964ea639ba22449e12e479d2d"
+    },
+    ".prettierrc": {
+      "mode": "100644",
+      "sha256": "5cb93861337baf947eccae2229429083657f6732f543545b94b765fb1b872a17"
+    },
+    ".tool-versions": {
+      "mode": "100644",
+      "sha256": "107abd5da93a3f8ca2c3536990b3e471933efbdb0f87a63410dc8451016a0ec4"
+    },
+    "LICENSE": {
+      "mode": "100644",
+      "sha256": "7cd6b2df1a140491f1f1e83c7de78d225190fb4ebc2d4392552279ae68aac6cd"
+    },
+    "eslint.config.js": {
+      "mode": "100644",
+      "sha256": "8659b321dfe4f02d00cefd93826d07a935a0d96dc9ff9a4db1f8bed739861a81"
+    },
+    "package.json": {
+      "mode": "100644",
+      "sha256": "4acc4c6ad89ea1ddaf1514f93eab35662ef56e9e5cb1353237c12692a73272ec"
+    },
+    "src/gunzip-data.ts": {
+      "mode": "100644",
+      "sha256": "853c3fe8d6b6112624071a54b86f2c05070578bf24e5ebc2317a71cf3ae0c79e"
+    },
+    "src/index.ts": {
+      "mode": "100644",
+      "sha256": "6f83d812d3266d057240147a44432f79307757897a05b0327c1648856dcc621e"
+    },
+    "src/update-data.ts": {
+      "mode": "100644",
+      "sha256": "83c0024f88b3188486c86b965d2a454618afd199bcd7305fc25fcec56f2d75d0"
+    },
+    "src/user-agent.ts": {
+      "mode": "100644",
+      "sha256": "175f687268ab67934b68fa314a3b4fd9e3d8ab2ad3212a1901a6c5bd5840e235"
+    },
+    "test/test-user-agent.js": {
+      "mode": "100644",
+      "sha256": "ae13d0f625d3b0ec2e7faec6c3421ba4a4dccacd729f12a0c8ec50416133fd35"
+    },
+    "tsconfig.json": {
+      "mode": "100644",
+      "sha256": "d4e6441554dd93e24e96f1ee76f58fa179334f709c55669d7355301850787f58"
+    },
+    "tsup.config.ts": {
+      "mode": "100644",
+      "sha256": "4a0237b6a1383746539ee9f006ed1b4c4e04a0af931ad8a2327571cbdd4220c9"
+    },
+    "yarn.lock": {
+      "mode": "100644",
+      "sha256": "9d00dc3e5b1ffa14cc0c48c0c91b1dee37aec63954b06ca1e83a0d37dc231f7d"
+    }
+  },
+  "repository": "https://github.com/intoli/user-agents.git",
+  "reviewed_commit": "f9b4344a0ea5427ccba51c0f7519174e837c4ab3"
+}

@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      matrix:
+        toolchain: [stable, '1.85.0']
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust
+        run: rustup toolchain install '${{ matrix.toolchain }}' --profile minimal --component rustfmt,clippy
+      - name: Check formatting
+        if: matrix.toolchain == 'stable'
+        run: cargo +stable fmt --all --check
+      - name: Lint
+        if: matrix.toolchain == 'stable'
+        run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: Rust tests and doctests
+        run: cargo +${{ matrix.toolchain }} test --locked
+      - name: Sync guard tests
+        if: matrix.toolchain == 'stable'
+        run: python3 -m unittest discover -s scripts -v
