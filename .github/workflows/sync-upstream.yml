@@ -29,9 +29,11 @@ jobs:
       # GITHUB_TOKEN pushes do not trigger CI, so validate here before committing.
       - name: Validate updated dataset and sync guard
         run: |
-          cargo +stable test --locked
+          cargo +stable test --locked --all-features
           python3 -m unittest discover -s scripts -v
       - name: Commit data update
+        env:
+          TZ: UTC
         run: |
           if git diff --quiet -- data/user-agents.json.gz data/upstream.json; then
             echo "No dataset changes to commit."

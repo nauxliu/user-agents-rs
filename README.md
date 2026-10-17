@@ -2,7 +2,7 @@
 
 A Rust port of [Intoli's user-agents](https://github.com/intoli/user-agents), with frequency-weighted random sampling, full browser fingerprints, recursive filters, and most-common profiles. BSD-2-Clause; Intoli's original license is retained.
 
-The gzip dataset is bundled into the executable with `include_bytes!`, decoded once, and shared between generators. Sampling uses a precomputed cumulative distribution and binary search. Generating another profile from an existing instance reuses its filters and distribution.
+The gzip dataset is bundled into the executable with `include_bytes!`, decoded once, and shared between generators. Sampling uses a precomputed cumulative distribution and binary search. A generator owns the prepared distribution; samples borrow immutable profiles from it. Construction and ranking do not access an RNG.
 
 ## Library
 
@@ -16,58 +16,61 @@ serde_json = "1"
 
 ```rust
 use serde_json::json;
-use user_agents::{Filter, UserAgent};
+use user_agents::{Filter, Generator};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut agent = UserAgent::new()?;
-    println!("{}", agent);                      // HTTP User-Agent header
-    println!("{}", agent.platform);             // Typed fingerprint field
-    println!("{}", serde_json::to_string_pretty(agent.data())?);
-    agent.randomize();                         // Replace the current sample
+    let all = Generator::new()?;
+    let profile = all.sample();
+    println!("{}", profile);               // HTTP User-Agent header
+    println!("{}", profile.platform);      // Typed fingerprint field
+    println!("{}", serde_json::to_string_pretty(profile)?);
 
-    let mobile = UserAgent::with_filter(json!({"deviceCategory": "mobile"}))?;
-    let another = mobile.random();             // Reuse the prepared distribution
+    let category = String::from("mobile");
+    let mobile = all.filter(|profile| profile.device_category == category)?;
+    let another = mobile.sample();        // Reuse the prepared distribution
     assert_eq!(another.device_category, "mobile");
-    let top_five = mobile.top(Some(5));          // Original upstream weights
-    let all_mobile = mobile.top(None);
+    let top_five = mobile.top(5);          // Borrowed profiles, original weights
+    let owned = another.clone();          // Explicitly take an independent copy
 
-    let chrome = UserAgent::with_filter(Filter::regex("Chrome")?)?;
-    let nested = UserAgent::with_filter(Filter::object([
-        ("connection", Filter::object([
-            ("effectiveType", "4g".into()),
-            ("rtt", Filter::predicate(|v| v.as_f64().is_some_and(|n| n < 100.0))),
-        ])),
-        ("userAgent", Filter::regex("Android")?),
-    ]))?;
+    let chrome_regex = user_agents::Regex::new("Chrome")?;
+    let chrome = all.filter(|p| chrome_regex.is_match(&p.user_agent))?;
 
-    let custom = UserAgent::with_filter(Filter::predicate(|profile| {
-        profile["screenWidth"].as_u64().is_some_and(|width| width >= 1200)
-    }))?;
+    // Recursive JSON filters are an adapter for configuration and CLI use.
+    let nested = all.filter_json(&Filter::from(json!({
+        "connection": {"effectiveType": "4g"},
+        "deviceCategory": "mobile"
+    })))?;
     Ok(())
 }
 ```
 
-Strings at the root match the exact `userAgent` string. Regexes at the root match that string; regexes inside objects match the selected field. JSON objects filter recursively, and arrays combine filters with **AND**, following upstream semantics. Missing properties do not match. Use `Filter::All` and `Filter::object` to mix regexes, predicates, and JSON filters.
+`Generator::filter` accepts `FnMut(&UserAgentData) -> bool`. Predicates may borrow local configuration and update local state; they are evaluated during preparation and are not stored. Chained filters narrow the current candidate set. `sample()` uses the thread RNG, while `sample_with_rng(&mut rng)` accepts a caller-supplied RNG for reproducible sampling.
 
-`UserAgentData` exposes common fields in Rust's `snake_case`. Less common fields such as `connection`, `language`, `oscpu`, and unknown future properties are preserved in `data().extra` with their original JSON names. Serializing `data()` reconstructs the full original fingerprint, including nulls. Profiles are immutable shared references; `top()` and `data().clone()` return independent copies.
+`top(count)` returns references ordered by descending original weight, with dataset order preserved for ties. Pass `usize::MAX` to return all matches. Sampling also returns references without cloning fingerprint strings/maps. Use `.clone()` when ownership is needed. Invalid data, no matching profiles, and all-zero filtered weights return distinct `Result` errors. There are no convenience methods that silently swallow these errors.
 
-`UserAgent::try_random(filter)` returns `None` when no profile matches. `UserAgent::top_filtered(count, filter)` returns an empty vector in that case. Fallible constructors expose errors instead. Rust uses methods rather than JavaScript's callable object/proxy syntax, and the Rust regex engine does not support JavaScript lookaround or backreferences. Custom predicates receive the selected JSON value and should not panic.
+`UserAgentData` exposes common fields in Rust's `snake_case` and implements `Display` for the HTTP header. Less common fields such as `connection`, `language`, `oscpu`, and unknown future properties are preserved in `extra` with their original JSON names. Serialization reconstructs the full fingerprint, including nulls.
 
-For external datasets use `Dataset::from_gzip` or `Dataset::from_json`, then `dataset.generator(Some(&filter))`. `random_with_rng` accepts an injected RNG for reproducible sampling. Invalid/negative weights are rejected; zero-weight entries can appear in `top()` but are never sampled. Filtered sets require at least one positive weight.
+For external data, use `Dataset::from_gzip` or `Dataset::from_json`, then `dataset.generator()`. Invalid/negative weights are rejected; zero-weight entries can appear in `top()` but are never sampled. Filtered generators require at least one positive weight. Gzip parsing consumes all members, accepts zero padding between/after members like Python's gzip reader, and rejects malformed/truncated streams and other trailing data.
+
+### JSON filter adapter
+
+Strings and regexes at the root match `userAgent`. Within objects they match the selected field. Objects filter recursively, and arrays combine filters with **AND**. Missing properties do not match. `Filter::All` and `Filter::object` can combine regexes and value filters.
+
+JSON integer comparisons preserve `u64` precision, including values above 2^53. Integral floats compare equal to the exact integer they represent. Regexes match **strings only**; numbers, nulls, arrays, and objects are never implicitly converted to strings. The Rust regex engine does not support JavaScript lookaround or backreferences. These explicit semantics replace JavaScript coercion and callable/proxy object behavior.
 
 ## Command line
 
 Requires Rust 1.85 or later.
 
 ```sh
-cargo run --release -- --count 5
-cargo run --release -- --device mobile --regex Chrome --count 3 --json
-cargo run --release -- --top --count 10 --filter '{"platform":"Win32"}'
-cargo install --git https://github.com/nauxliu/user-agents-rs --locked
+cargo run --release --features cli -- --count 5
+cargo run --release --features cli -- --device mobile --regex Chrome --count 3 --json
+cargo run --release --features cli -- --top --count 10 --filter '{"platform":"Win32"}'
+cargo install --git https://github.com/nauxliu/user-agents-rs --locked --features cli
 user-agents --device desktop --count 5
 ```
 
-Without `--json`, output is one HTTP User-Agent string per line. `--json` prints complete fingerprints as an array. Invalid arguments, invalid regexes, and filters without matches exit with a nonzero status.
+The CLI is enabled by the optional `cli` feature; library users do not pull in `clap`. Without `--json`, output is one HTTP User-Agent string per line. `--json` prints complete fingerprints as an array. Invalid arguments, invalid regexes, and filters without matches exit with a nonzero status.
 
 ## Daily data updates
 
@@ -89,9 +92,10 @@ See [UPSTREAM.md](UPSTREAM.md) for the review/update procedure and the exact mon
 
 ```sh
 python3 tools/check_fmt.py
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo check --locked --no-default-features --lib
+cargo test --locked --all-features
 python3 -m unittest discover -s scripts -v
 ```
 
-CI covers stable Rust and the minimum supported Rust version. Tests cover weighted sampling, zero weights, nested/regex/predicate/AND filters, missing fields, top ordering, fingerprint preservation, the CLI, and data-sync failure behavior.
+CI covers stable Rust and the minimum supported Rust version. Tests cover weighted sampling, zero weights, typed predicates with borrowed state, nested JSON/regex/AND filters, exact integer comparisons, ranking, fingerprint preservation, the optional CLI, shared Python/Rust gzip fixtures, and data-sync failure behavior.

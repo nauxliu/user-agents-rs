@@ -24,9 +24,11 @@ jobs:
         run: cargo +stable fmt --all --check
       - name: Lint
         if: matrix.toolchain == 'stable'
-        run: cargo +stable clippy --locked --all-targets -- -D warnings
+        run: cargo +stable clippy --locked --all-targets --all-features -- -D warnings
+      - name: Check library without CLI dependencies
+        run: cargo +${{ matrix.toolchain }} check --locked --no-default-features --lib
       - name: Rust tests and doctests
-        run: cargo +${{ matrix.toolchain }} test --locked
+        run: cargo +${{ matrix.toolchain }} test --locked --all-features
       - name: Sync guard tests
         if: matrix.toolchain == 'stable'
         run: python3 -m unittest discover -s scripts -v

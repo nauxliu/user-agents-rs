@@ -1,0 +1,16 @@
+{
+  "bad-crc.gz": false,
+  "empty-dataset.gz": false,
+  "invalid-json.gz": false,
+  "missing-fields.gz": false,
+  "multi-member.gz": true,
+  "negative-weight.gz": false,
+  "nonfinite-number.gz": false,
+  "not-gzip.gz": false,
+  "padding-between-members.gz": true,
+  "padding-only.gz": false,
+  "single.gz": true,
+  "trailing-junk.gz": false,
+  "truncated.gz": false,
+  "zero-padding.gz": true
+}

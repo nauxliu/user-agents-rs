@@ -1,18 +1,16 @@
 use regex::Regex;
 use serde_json::{Map, Value};
-use std::sync::Arc;
 
 /// Recursive filters. Arrays and object fields are combined with AND, as upstream.
 ///
 /// At the root, strings and regexes match `userAgent`. Within objects they match
 /// the selected property. Missing properties never match, including null filters.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Filter {
     Equals(Value),
     Regex(Regex),
     All(Vec<Filter>),
     Object(Vec<(String, Filter)>),
-    Predicate(Arc<dyn Fn(&Value) -> bool + Send + Sync>),
 }
 
 impl Filter {
@@ -33,19 +31,16 @@ impl Filter {
         Self::Object(fields.into_iter().map(|(k, v)| (k.into(), v)).collect())
     }
 
-    pub fn predicate(f: impl Fn(&Value) -> bool + Send + Sync + 'static) -> Self {
-        Self::Predicate(Arc::new(f))
-    }
-
     pub fn matches(&self, value: &Value) -> bool {
         match self {
             Self::Equals(expected) => equal(expected, ua_or_value(value)),
-            Self::Regex(regex) => regex.is_match(&js_string(ua_or_value(value))),
+            Self::Regex(regex) => ua_or_value(value)
+                .as_str()
+                .is_some_and(|s| regex.is_match(s)),
             Self::All(filters) => filters.iter().all(|filter| filter.matches(value)),
             Self::Object(fields) => fields
                 .iter()
                 .all(|(key, filter)| value.get(key).is_some_and(|child| filter.matches(child))),
-            Self::Predicate(predicate) => predicate(value),
         }
     }
 }
@@ -57,30 +52,35 @@ fn ua_or_value(value: &Value) -> &Value {
         .unwrap_or(value)
 }
 
-// JavaScript numbers do not distinguish integer and floating-point JSON syntax.
+// Compare integral JSON numbers exactly, while allowing 50 to equal 50.0.
+// Converting every u64 to f64 would merge distinct values above 2^53.
 fn equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+        (Value::Number(a), Value::Number(b)) if a != b => {
+            if a.is_f64() && !b.is_f64() {
+                float_equals_integer(a.as_f64().unwrap(), b)
+            } else if b.is_f64() && !a.is_f64() {
+                float_equals_integer(b.as_f64().unwrap(), a)
+            } else {
+                false
+            }
+        }
         _ => a == b,
     }
 }
 
-fn js_string(value: &Value) -> String {
-    match value {
-        Value::String(s) => s.clone(),
-        Value::Object(_) => "[object Object]".into(),
-        Value::Array(values) => values
-            .iter()
-            .map(|v| {
-                if v.is_null() {
-                    String::new()
-                } else {
-                    js_string(v)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(","),
-        other => other.to_string(),
+fn float_equals_integer(float: f64, integer: &serde_json::Number) -> bool {
+    if float.fract() != 0.0 {
+        return false;
+    }
+    // Explicit exclusive upper bounds avoid Rust's saturating float casts at
+    // u64::MAX/i64::MAX, which round to the next power of two as f64.
+    if let Some(value) = integer.as_u64() {
+        (0.0..18_446_744_073_709_551_616.0).contains(&float) && float as u64 == value
+    } else if let Some(value) = integer.as_i64() {
+        (-9_223_372_036_854_775_808.0..0.0).contains(&float) && float as i64 == value
+    } else {
+        false
     }
 }
 

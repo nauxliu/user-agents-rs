@@ -1,13 +1,12 @@
 //! Frequency-weighted browser profiles from Intoli's user-agents dataset.
 //!
 //! ```
-//! use serde_json::json;
-//! use user_agents::{Filter, UserAgent};
+//! use user_agents::Generator;
 //!
-//! let agent = UserAgent::with_filter(Filter::from(json!({"deviceCategory": "mobile"})))?;
-//! assert_eq!(agent.device_category, "mobile");
-//! println!("{}", agent.random());
-//! let most_common = agent.top(Some(5));
+//! let mobile = Generator::new()?.filter(|profile| profile.device_category == "mobile")?;
+//! assert_eq!(mobile.sample().device_category, "mobile");
+//! println!("{}", mobile.sample());
+//! let most_common = mobile.top(5);
 //! # Ok::<(), user_agents::Error>(())
 //! ```
 
@@ -15,14 +14,13 @@ mod filter;
 pub use filter::Filter;
 pub use regex::Regex;
 
-use flate2::read::GzDecoder;
+use flate2::bufread::GzDecoder;
 use rand::{Rng, RngExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{
     fmt,
     io::Read,
-    ops::Deref,
     sync::{Arc, OnceLock},
 };
 
@@ -78,16 +76,26 @@ impl Dataset {
     }
 
     pub fn from_gzip(bytes: &[u8]) -> Result<Self, Error> {
+        const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
         let mut json = Vec::new();
-        // Cap decompression for caller-supplied data as well as downloaded data.
-        GzDecoder::new(bytes)
-            .take(64 * 1024 * 1024 + 1)
-            .read_to_end(&mut json)
-            .map_err(|error| Error::InvalidData(error.to_string()))?;
-        if json.len() > 64 * 1024 * 1024 {
-            return Err(Error::InvalidData(
-                "decompressed data exceeds 64 MiB".into(),
-            ));
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            // The BufRead decoder preserves bytes after each member, allowing
+            // us to skip gzip zero padding just as Python's gzip.GzipFile does.
+            let mut decoder = GzDecoder::new(remaining);
+            decoder
+                .by_ref()
+                .take((MAX_JSON_BYTES + 1 - json.len()) as u64)
+                .read_to_end(&mut json)
+                .map_err(|error| Error::InvalidData(error.to_string()))?;
+            if json.len() > MAX_JSON_BYTES {
+                return Err(Error::InvalidData(
+                    "decompressed data exceeds 64 MiB".into(),
+                ));
+            }
+            remaining = decoder.into_inner();
+            let padding = remaining.iter().take_while(|&&byte| byte == 0).count();
+            remaining = &remaining[padding..];
         }
         Self::from_json(&json)
     }
@@ -120,9 +128,9 @@ impl Dataset {
         &self.0
     }
 
-    pub fn generator(&self, filter: Option<&Filter>) -> Result<UserAgent, Error> {
-        let selection = Arc::new(Selection::new(self.clone(), filter)?);
-        Ok(UserAgent::sample(selection, &mut rand::rng()))
+    /// Prepare the full distribution without drawing a sample or accessing an RNG.
+    pub fn generator(&self) -> Result<Generator, Error> {
+        Generator::from_indices(self.clone(), (0..self.0.len()).collect())
     }
 }
 
@@ -133,18 +141,7 @@ struct Selection {
 }
 
 impl Selection {
-    fn new(dataset: Dataset, filter: Option<&Filter>) -> Result<Self, Error> {
-        let indices: Vec<usize> = dataset
-            .0
-            .iter()
-            .enumerate()
-            .filter_map(|(index, profile)| {
-                let matches = filter.is_none_or(|filter| {
-                    filter.matches(&serde_json::to_value(profile).expect("validated JSON profile"))
-                });
-                matches.then_some(index)
-            })
-            .collect();
+    fn new(dataset: Dataset, indices: Vec<usize>) -> Result<Self, Error> {
         if indices.is_empty() {
             return Err(Error::NoMatches);
         }
@@ -182,96 +179,89 @@ impl Selection {
     }
 }
 
-/// A current sample and a reusable, precomputed filtered distribution.
-/// Cloning/random sampling shares the dataset and distribution; profile data is
-/// returned by reference or cloned explicitly via `data().clone()` / `top()`.
+/// A reusable weighted distribution, independent of any particular sample.
+///
+/// Construction, filtering, and ranking never access an RNG. Samples and ranked
+/// entries borrow immutable profiles; call `.clone()` when ownership is needed.
 #[derive(Clone, Debug)]
-pub struct UserAgent {
-    selection: Arc<Selection>,
-    index: usize,
-}
+pub struct Generator(Arc<Selection>);
 
-impl UserAgent {
+impl Generator {
+    /// Use the bundled dataset and a distribution prepared once per process.
     pub fn new() -> Result<Self, Error> {
         static SELECTION: OnceLock<Result<Arc<Selection>, Error>> = OnceLock::new();
-        let selection = SELECTION
-            .get_or_init(|| Selection::new(Dataset::bundled()?, None).map(Arc::new))
-            .clone()?;
-        Ok(Self::sample(selection, &mut rand::rng()))
+        SELECTION
+            .get_or_init(|| {
+                let dataset = Dataset::bundled()?;
+                Selection::new(dataset.clone(), (0..dataset.0.len()).collect()).map(Arc::new)
+            })
+            .clone()
+            .map(Self)
     }
 
-    pub fn with_filter(filter: impl Into<Filter>) -> Result<Self, Error> {
-        Dataset::bundled()?.generator(Some(&filter.into()))
+    fn from_indices(dataset: Dataset, indices: Vec<usize>) -> Result<Self, Error> {
+        Selection::new(dataset, indices).map(Arc::new).map(Self)
     }
 
-    /// Convenience equivalent to upstream's static `random(filters)`.
-    pub fn try_random(filter: impl Into<Filter>) -> Option<Self> {
-        Self::with_filter(filter).ok()
+    /// Restrict the current candidate set with a typed Rust predicate.
+    /// The predicate is evaluated only during preparation and may borrow locals.
+    pub fn filter(&self, mut predicate: impl FnMut(&UserAgentData) -> bool) -> Result<Self, Error> {
+        let indices = self
+            .0
+            .cumulative
+            .iter()
+            .map(|&(_, i)| i)
+            .filter(|&i| predicate(&self.0.dataset.0[i]))
+            .collect();
+        Self::from_indices(self.0.dataset.clone(), indices)
     }
 
-    pub fn data(&self) -> &UserAgentData {
-        &self.selection.dataset.0[self.index]
+    /// Adapter for recursive JSON/regex filters, primarily for configuration/CLI.
+    /// Prefer `filter` for typed field access without JSON serialization.
+    pub fn filter_json(&self, filter: &Filter) -> Result<Self, Error> {
+        self.filter(|profile| {
+            filter
+                .matches(&serde_json::to_value(profile).expect("validated immutable JSON profile"))
+        })
     }
 
-    pub fn random(&self) -> Self {
-        self.random_with_rng(&mut rand::rng())
+    pub fn sample(&self) -> &UserAgentData {
+        self.sample_with_rng(&mut rand::rng())
     }
 
-    pub fn random_with_rng(&self, rng: &mut (impl Rng + ?Sized)) -> Self {
-        Self::sample(self.selection.clone(), rng)
+    pub fn sample_with_rng(&self, rng: &mut (impl Rng + ?Sized)) -> &UserAgentData {
+        let probability: f64 = rng.random();
+        let position = self
+            .0
+            .cumulative
+            .partition_point(|&(weight, _)| weight <= probability);
+        &self.0.dataset.0[self.0.cumulative[position].1]
     }
 
-    pub fn randomize(&mut self) {
-        *self = self.random();
+    pub fn len(&self) -> usize {
+        self.0.cumulative.len()
     }
 
-    pub fn matching_len(&self) -> usize {
-        self.selection.cumulative.len()
+    pub fn is_empty(&self) -> bool {
+        self.0.cumulative.is_empty()
     }
 
-    /// Cumulative probability and original dataset index, in dataset order.
-    pub fn cumulative_weight_index_pairs(&self) -> &[(f64, usize)] {
-        &self.selection.cumulative
-    }
-
-    /// Most frequent matching fingerprints. `None` returns all; `Some(0)` none.
-    /// Ties retain dataset order. Returned weights are the original frequencies.
-    pub fn top(&self, count: Option<usize>) -> Vec<UserAgentData> {
-        let mut indices: Vec<_> = self.selection.cumulative.iter().map(|&(_, i)| i).collect();
-        let profiles = &self.selection.dataset.0;
+    /// Most frequent matching profiles, borrowing data without cloning fields.
+    /// Ties retain dataset order. Weights retain their original upstream values.
+    /// Pass `usize::MAX` to return all matching profiles.
+    pub fn top(&self, count: usize) -> Vec<&UserAgentData> {
+        let mut indices: Vec<_> = self.0.cumulative.iter().map(|&(_, i)| i).collect();
+        let profiles = &self.0.dataset.0;
         indices.sort_by(|&a, &b| profiles[b].weight.total_cmp(&profiles[a].weight));
         indices
             .into_iter()
-            .take(count.unwrap_or(usize::MAX))
-            .map(|i| profiles[i].clone())
+            .take(count)
+            .map(|i| &profiles[i])
             .collect()
     }
-
-    /// Convenience equivalent to upstream's static `top(count, filters)`.
-    pub fn top_filtered(count: Option<usize>, filter: impl Into<Filter>) -> Vec<UserAgentData> {
-        Self::with_filter(filter)
-            .map(|agent| agent.top(count))
-            .unwrap_or_default()
-    }
-
-    fn sample(selection: Arc<Selection>, rng: &mut (impl Rng + ?Sized)) -> Self {
-        let probability: f64 = rng.random();
-        let position = selection
-            .cumulative
-            .partition_point(|&(weight, _)| weight <= probability);
-        let index = selection.cumulative[position].1;
-        Self { selection, index }
-    }
 }
 
-impl Deref for UserAgent {
-    type Target = UserAgentData;
-    fn deref(&self) -> &Self::Target {
-        self.data()
-    }
-}
-
-impl fmt::Display for UserAgent {
+impl fmt::Display for UserAgentData {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.user_agent)
     }

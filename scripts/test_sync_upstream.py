@@ -104,8 +104,46 @@ class SyncTests(unittest.TestCase):
             sync(self.repo, self.root)
         self.assertEqual(before, self.snapshot())
 
+    def test_monitored_symlink_blocks(self):
+        source = self.repo / "src/user-agent.ts"
+        source.unlink()
+        source.symlink_to("../package.json")
+        self.commit()
+        self.assert_blocked()
+
+    def test_gitlink_blocks(self):
+        revision = self.git("rev-parse", "HEAD").decode().strip()
+        self.git("update-index", "--add", "--cacheinfo", f"160000,{revision},vendor/tool")
+        self.git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "gitlink")
+        self.assert_blocked()
+
+    def test_missing_or_symlink_dataset_does_not_modify_files(self):
+        path = self.repo / "src/user-agents.json.gz"
+        for symlink in (False, True):
+            if path.exists() or path.is_symlink():
+                path.unlink()
+            if symlink:
+                path.symlink_to("../package.json")
+            self.commit()
+            before = self.snapshot()
+            with self.assertRaises(ValueError):
+                sync(self.repo, self.root)
+            self.assertEqual(before, self.snapshot())
+
 
 class BundledDataTests(unittest.TestCase):
+    def test_python_and_rust_share_gzip_acceptance_fixtures(self):
+        directory = ROOT / "tests/fixtures/gzip"
+        expectations = json.loads((directory / "expectations.json").read_bytes())
+        for name, expected in expectations.items():
+            with self.subTest(name=name):
+                try:
+                    validate_data((directory / name).read_bytes())
+                    accepted = True
+                except (ValueError, OSError, EOFError):
+                    accepted = False
+                self.assertEqual(accepted, expected)
+
     def test_invalid_json_numbers_are_rejected(self):
         for value in ("NaN", "Infinity", "-Infinity", "1e9999"):
             with self.subTest(value=value), self.assertRaises(ValueError):

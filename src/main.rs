@@ -1,6 +1,6 @@
 use clap::Parser;
 use serde_json::json;
-use user_agents::{Filter, UserAgent};
+use user_agents::{Filter, Generator};
 
 #[derive(Parser)]
 #[command(
@@ -42,17 +42,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &filter,
         )?));
     }
-    let agent = if filters.is_empty() {
-        UserAgent::new()?
+    let generator = if filters.is_empty() {
+        Generator::new()?
     } else {
-        UserAgent::with_filter(Filter::All(filters))?
+        Generator::new()?.filter_json(&Filter::All(filters))?
     };
     let profiles = if args.top {
-        agent.top(Some(args.count))
+        generator.top(args.count)
     } else {
-        (0..args.count)
-            .map(|_| agent.random().data().clone())
-            .collect()
+        (0..args.count).map(|_| generator.sample()).collect()
     };
     if args.json {
         println!("{}", serde_json::to_string_pretty(&profiles)?);
