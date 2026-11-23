@@ -1,6 +1,6 @@
 {
-  "commit": "7bc41d639db6208f3ef0897ce58c11b7a034cc52",
+  "commit": "bc5d679da3ef05a37e22f6bd4a46c8daada21dbf",
   "profiles": 10000,
   "repository": "https://github.com/intoli/user-agents.git",
-  "sha256": "f0130f824651d32796d4a28ede72ee065dc70dec57f822c90d3a0d05fe0247a6"
+  "sha256": "f539facea1942cf02cb521670af4a15f686abf3a50e13ed64e96ea2a16415ec1"
 }
